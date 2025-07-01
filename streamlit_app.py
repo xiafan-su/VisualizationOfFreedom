@@ -2,7 +2,9 @@ import streamlit as st
 import pandas as pd
 import os
 import pandas as pd
+import plotly.graph_objects as go
 import ccxt as ccxt
+import sqlite3
 
 from dotenv import load_dotenv
 
@@ -17,12 +19,10 @@ if not API_KEY or not API_SECRET:
     st.error("API_KEY or API_SECRET not found in environment variables. Please check your .env file.")
     st.stop() # Stop the app if crucial credentials are missing
 
-
-@st.cache_data(ttl=0) # ttl=0 ensures no caching, data is always refetched
-def get_live_trade_data(symbol: str, type: str):
-    """Simulates fetching real-time trade data."""
-    st.write("Fetching live trade data...")
-
+# --- Initialize CCXT Exchange (cached for efficiency) ---
+@st.cache_resource
+def get_exchange(type):
+    """Initializes and returns the CCXT Binance exchange object."""
     exchange = ccxt.binance(
         {
             'apiKey': API_KEY,
@@ -34,18 +34,66 @@ def get_live_trade_data(symbol: str, type: str):
             }
         }
     )
+    return exchange
+
+@st.cache_data(ttl=0) # ttl=0 ensures no caching, data is always refetched
+def get_live_trade_data(symbol: str, type: str):
+    """Simulates fetching real-time trade data."""
+    st.write("Fetching live trade data...")
+
+    exchange = get_exchange(type)
+
     trades = exchange.fetch_my_trades(symbol=symbol, limit=1000)
     df = pd.DataFrame([trade['info'] for trade in trades])
     df.insert(0, 'datetime', pd.to_datetime(df['time'], unit='ms'))
-    # df['datetime'] = pd.to_datetime(df['time'], unit='ms') # For display purposes
-    # df['price'] = df['price'].apply(float)
-    # df['qty'] = df['qty'].apply(float)
-    # df['commission'] = df['commission'].apply(float)
-    # df['realizedPnl'] = df['realizedPnl'].apply(float)
     df_sorted = df.sort_values(by='datetime', ascending=False)
     return df_sorted
 
+# --- Function to fetch K-line data ---
+@st.cache_data(ttl=0) # ttl=0 ensures no caching, data is always refetched
+def fetch_klines(symbol: str, type: str, timeframe='1m', limit=1440, since=None):
+    """
+    Fetches OHLCV (K-line) data from Binance using CCXT.
+    Handles pagination if `limit` exceeds single request max (Binance max ~1000-1500).
+    """
+    st.write(f"Fetching {timeframe} k-lines for {symbol}...")
 
+    exchange = get_exchange(type)
+    ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since, limit)
+
+    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df.set_index('timestamp', inplace=True)
+    df.sort_index(inplace=True) # Ensure chronological order
+
+    return df
+
+# --- Function to fetch K-line data ---
+@st.cache_data(ttl=0) # ttl=0 ensures no caching, data is always refetched
+def fetch_scores(symbol: str):
+    DATABASE_FILE = 'scores.db'
+    conn = None
+    try:
+        conn = sqlite3.connect(DATABASE_FILE)
+        cursor = conn.cursor()
+        cursor.execute("SELECT symbol, timestamp, score FROM scores ORDER BY symbol, timestamp")
+        rows = cursor.fetchall()
+
+        scores = []
+        for row in rows:
+            scores.append({
+                "symbol": row[0],
+                "timestamp": row[1], # Return raw milliseconds
+                "score": row[2]
+            })
+        return jsonify(scores), 200
+    except sqlite3.Error as e:
+        return jsonify({"error": f"Database error: {e}"}), 500
+    except Exception as e:
+        return jsonify({"error": f"An unexpected error occurred: {e}"}), 500
+    finally:
+        if conn:
+            conn.close()
 
 # Set the title and favicon that appear in the Browser's tab bar.
 st.set_page_config(
@@ -69,11 +117,6 @@ selected_symbol_type = st.selectbox(
     help="Choose the type of the symbol."
 )
 
-# if 'symbol' not in st.session_state or 'type' not in st.session_state :
-#     st.session_state.symbol = 'BTCUSDT' # Default value
-#     st.session_state.type = 'future' # Default value
-
-
 # --- The "Load Data" Button ---
 # Data will only load when this button is clicked
 if st.button("Load Data", help="Click to fetch trade data for the selected symbol."):
@@ -83,6 +126,46 @@ if st.button("Load Data", help="Click to fetch trade data for the selected symbo
 
     # Check if data should be loaded (only after the button is clicked)
     if 'symbol' in st.session_state and 'type' in st.session_state:
+        df_klines = fetch_klines(symbol=st.session_state.symbol, type=st.session_state.type)
+
+        if not df_klines.empty:
+            st.subheader(f"{selected_symbol} K-line Chart")
+            # Create Candlestick chart
+            fig = go.Figure(data=[go.Candlestick(
+                x=df_klines.index,
+                open=df_klines['open'],
+                high=df_klines['high'],
+                low=df_klines['low'],
+                close=df_klines['close'],
+                name='Candlesticks'
+            )])
+
+            # Add Volume bars
+            fig.add_trace(go.Bar(
+                x=df_klines.index,
+                y=df_klines['volume'],
+                name='Volume',
+                marker_color='rgba(0, 150, 0, 0.5)',  # Green for up, red for down (simple)
+                yaxis='y2' # Assign to secondary y-axis
+            ))
+
+            # Update layout for better appearance
+            fig.update_layout(
+                xaxis_rangeslider_visible=False, # Hide the default range slider for cleaner look
+                xaxis_title="Time",
+                yaxis_title="Price",
+                title=f"{selected_symbol} K-line Chart",
+                hovermode="x unified",
+                height=600,
+                # Add secondary y-axis for volume
+                yaxis=dict(domain=[0.3, 1]), # Price axis occupies top 70%
+                yaxis2=dict(domain=[0, 0.25], anchor='x', overlaying='y', side='right', showgrid=False, title='Volume'), # Volume axis occupies bottom 25%
+                template="plotly_dark", # Or "plotly_white"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.warning("No data fetched for the selected parameters. Please try different settings.")
+
         st.subheader(f"Trade Data for {st.session_state.symbol}")
         df = get_live_trade_data(symbol=st.session_state.symbol, type=st.session_state.type)
 
@@ -96,147 +179,3 @@ if st.button("Load Data", help="Click to fetch trade data for the selected symbo
             # This will be displayed if the DataFrame is empty or an error occurred
             st.info("Please select a symbol and click 'Load Data' to view trades.")
 
-# df = get_live_trade_data(symbol=selected_symbol, type=selected_symbol_type)
-
-# st.dataframe(
-#     df,
-#     column_order=["datetime", "symbol", "side", "price", "qty", "realizedPnl", "commission", "commissionAsset", "positionSide", "maker", "buyer", "id", "orderId"]
-# )
-
-# @st.cache_data
-# def get_gdp_data():
-#     """Grab GDP data from a CSV file.
-
-#     This uses caching to avoid having to read the file every time. If we were
-#     reading from an HTTP endpoint instead of a file, it's a good idea to set
-#     a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-#     """
-
-#     # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-#     DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-#     raw_gdp_df = pd.read_csv(DATA_FILENAME)
-
-#     MIN_YEAR = 1960
-#     MAX_YEAR = 2022
-
-#     # The data above has columns like:
-#     # - Country Name
-#     # - Country Code
-#     # - [Stuff I don't care about]
-#     # - GDP for 1960
-#     # - GDP for 1961
-#     # - GDP for 1962
-#     # - ...
-#     # - GDP for 2022
-#     #
-#     # ...but I want this instead:
-#     # - Country Name
-#     # - Country Code
-#     # - Year
-#     # - GDP
-#     #
-#     # So let's pivot all those year-columns into two: Year and GDP
-#     gdp_df = raw_gdp_df.melt(
-#         ['Country Code'],
-#         [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-#         'Year',
-#         'GDP',
-#     )
-
-#     # Convert years from string to integers
-#     gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
-
-#     return gdp_df
-
-# gdp_df = get_gdp_data()
-
-# # -----------------------------------------------------------------------------
-# # Draw the actual page
-
-# # Set the title that appears at the top of the page.
-# '''
-# # :earth_americas: GDP dashboard
-
-# Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-# notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-# But it's otherwise a great (and did I mention _free_?) source of data.
-# '''
-
-# # Add some spacing
-# ''
-# ''
-
-# min_value = gdp_df['Year'].min()
-# max_value = gdp_df['Year'].max()
-
-# from_year, to_year = st.slider(
-#     'Which years are you interested in?',
-#     min_value=min_value,
-#     max_value=max_value,
-#     value=[min_value, max_value])
-
-# countries = gdp_df['Country Code'].unique()
-
-# if not len(countries):
-#     st.warning("Select at least one country")
-
-# selected_countries = st.multiselect(
-#     'Which countries would you like to view?',
-#     countries,
-#     ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-# ''
-# ''
-# ''
-
-# # Filter the data
-# filtered_gdp_df = gdp_df[
-#     (gdp_df['Country Code'].isin(selected_countries))
-#     & (gdp_df['Year'] <= to_year)
-#     & (from_year <= gdp_df['Year'])
-# ]
-
-# st.header('GDP over time', divider='gray')
-
-# ''
-
-# st.line_chart(
-#     filtered_gdp_df,
-#     x='Year',
-#     y='GDP',
-#     color='Country Code',
-# )
-
-# ''
-# ''
-
-
-# first_year = gdp_df[gdp_df['Year'] == from_year]
-# last_year = gdp_df[gdp_df['Year'] == to_year]
-
-# st.header(f'GDP in {to_year}', divider='gray')
-
-# ''
-
-# cols = st.columns(4)
-
-# for i, country in enumerate(selected_countries):
-#     col = cols[i % len(cols)]
-
-#     with col:
-#         first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-#         last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-#         if math.isnan(first_gdp):
-#             growth = 'n/a'
-#             delta_color = 'off'
-#         else:
-#             growth = f'{last_gdp / first_gdp:,.2f}x'
-#             delta_color = 'normal'
-
-#         st.metric(
-#             label=f'{country} GDP',
-#             value=f'{last_gdp:,.0f}B',
-#             delta=growth,
-#             delta_color=delta_color
-#         )
