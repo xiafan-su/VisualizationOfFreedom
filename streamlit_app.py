@@ -63,6 +63,7 @@ def fetch_klines(symbol: str, type: str, timeframe='1m', limit=1440, since=None)
 
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df['merge_key'] = df['timestamp'].dt.floor('min')
     df.set_index('timestamp', inplace=True)
     df.sort_index(inplace=True) # Ensure chronological order
 
@@ -76,21 +77,22 @@ def fetch_scores(symbol: str):
     try:
         conn = sqlite3.connect(DATABASE_FILE)
         cursor = conn.cursor()
-        cursor.execute("SELECT symbol, timestamp, score FROM scores ORDER BY symbol, timestamp")
+        cursor.execute("SELECT symbol, timestamp, score FROM scores WHERE symbol = ? ORDER BY timestamp", (symbol,))
         rows = cursor.fetchall()
 
         scores = []
         for row in rows:
-            scores.append({
-                "symbol": row[0],
-                "timestamp": row[1], # Return raw milliseconds
-                "score": row[2]
-            })
-        return jsonify(scores), 200
+            scores.append([row[0], row[1], row[2]])
+        scores_df = pd.DataFrame(scores, columns=['symbol', 'timestamp', 'score'])
+        scores_df['merge_key'] = pd.to_datetime(scores_df['timestamp'], unit='ms')
+        scores_df['merge_key'] = scores_df['merge_key'].dt.floor('min')
+        return scores_df
     except sqlite3.Error as e:
-        return jsonify({"error": f"Database error: {e}"}), 500
+        print(f"Database error: {e}")
+        return None
     except Exception as e:
-        return jsonify({"error": f"An unexpected error occurred: {e}"}), 500
+        print(f"An unexpected error occurred: {e}")
+        return None
     finally:
         if conn:
             conn.close()
@@ -127,6 +129,11 @@ if st.button("Load Data", help="Click to fetch trade data for the selected symbo
     # Check if data should be loaded (only after the button is clicked)
     if 'symbol' in st.session_state and 'type' in st.session_state:
         df_klines = fetch_klines(symbol=st.session_state.symbol, type=st.session_state.type)
+        df_scores = fetch_scores(symbol=st.session_state.symbol)
+        df_klines = pd.merge(df_klines, df_scores[['merge_key', 'score']],
+                on='merge_key', how='left')
+        df_klines.set_index('merge_key', inplace=True)
+        df_klines = df_klines.sort_index()
 
         if not df_klines.empty:
             st.subheader(f"{selected_symbol} K-line Chart")
@@ -137,7 +144,7 @@ if st.button("Load Data", help="Click to fetch trade data for the selected symbo
                 high=df_klines['high'],
                 low=df_klines['low'],
                 close=df_klines['close'],
-                name='Candlesticks'
+                name='Candlesticks',
             )])
 
             # Add Volume bars
@@ -146,7 +153,25 @@ if st.button("Load Data", help="Click to fetch trade data for the selected symbo
                 y=df_klines['volume'],
                 name='Volume',
                 marker_color='rgba(0, 150, 0, 0.5)',  # Green for up, red for down (simple)
-                yaxis='y2' # Assign to secondary y-axis
+                yaxis='y2', # Assign to secondary y-axis
+            ))
+
+            # --- Workaround: Add an invisible Scatter trace for custom hover info ---
+            # This trace will carry all the hover data you want.
+            # Make sure it uses the same x-axis values as your candlesticks.
+
+            fig.add_trace(go.Scatter(
+                x=df_klines.index,
+                y=(df_klines['high'] + df_klines['low']) / 2, # Plot at the middle of the candle
+                mode='markers', # We need markers for hover, but we'll make them invisible
+                marker=dict(size=1, opacity=0), # Make markers tiny and fully transparent
+                name='Score', # This name might appear if hoverinfo is not 'none'
+                hoverinfo='text', # Crucial: Tell plotly to use text from hovertemplate
+                # Prepare customdata for the Scatter trace
+                customdata=df_klines[['score']].fillna('N/A').values,
+                hovertemplate=(
+                    "<b>Score:</b> %{customdata[0]:.6f}<extra></extra>"
+                )
             ))
 
             # Update layout for better appearance
