@@ -1,5 +1,4 @@
 import streamlit as st
-import pandas as pd
 import os
 import pandas as pd
 import plotly.graph_objects as go
@@ -7,6 +6,8 @@ import ccxt as ccxt
 import sqlite3
 
 from dotenv import load_dotenv
+from db_manager import fetch_symbols, fetch_scores, fetch_balance_history
+from ccxt_helper import get_balance_in_usdt
 
 # Load environment variables from .env file
 load_dotenv()
@@ -66,57 +67,9 @@ def fetch_klines(symbol: str, type: str, timeframe='1m', limit=1440, since=None)
 
     return df
 
-# --- Function to fetch scores data ---
-@st.cache_data(ttl=0) # ttl=0 ensures no caching, data is always refetched
-def fetch_scores(symbol: str):
-    DATABASE_FILE = 'scores.db'
-    conn = None
-    try:
-        conn = sqlite3.connect(DATABASE_FILE)
-        cursor = conn.cursor()
-        cursor.execute("SELECT symbol, timestamp, score FROM scores WHERE symbol = ? ORDER BY timestamp", (symbol,))
-        rows = cursor.fetchall()
-
-        scores = []
-        for row in rows:
-            scores.append([row[0], row[1], row[2]])
-        scores_df = pd.DataFrame(scores, columns=['symbol', 'timestamp', 'score'])
-        scores_df['merge_key'] = pd.to_datetime(scores_df['timestamp'], unit='ms')
-        scores_df['merge_key'] = scores_df['merge_key'].dt.floor('min')
-        return scores_df
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
-        return None
-    except Exception as e:
-        print(f"An unexpected error occurred: {e}")
-        return None
-    finally:
-        if conn:
-            conn.close()
-
-# --- Function to fetch all symbols list ---
-@st.cache_data(ttl=0) # ttl=0 ensures no caching, data is always refetched
-def fetch_symbols():
-    DATABASE_FILE = 'scores.db'
-    conn = None
-    try:
-        conn = sqlite3.connect(DATABASE_FILE)
-        cursor = conn.cursor()
-        cursor.execute("SELECT DISTINCT symbol FROM scores")
-        rows = cursor.fetchall()
-        symbols = []
-        for row in rows:
-            symbols.append(row[0])
-        return symbols
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
-        return []
-    except Exception as e:
-        print(f"An unexpected error occurred: {e}")
-        return []
-    finally:
-        if conn:
-            conn.close()
+@st.cache_data(ttl=0)
+def load_balance_history():
+    return fetch_balance_history()
 
 # Set the title and favicon that appear in the Browser's tab bar.
 st.set_page_config(
@@ -144,6 +97,43 @@ selected_symbol_type = st.selectbox(
     index=0, # Default to future
     help="Choose the type of the symbol."
 )
+
+# Load data from the database
+balance_df = load_balance_history()
+
+if not balance_df.empty:
+    st.subheader("Balance History")
+
+    # Create the Plotly Line Chart
+    fig = go.Figure(data=go.Scatter(
+        x=balance_df['datetime'], # Use the UTC datetime column for the X-axis
+        y=balance_df['total_usdt_value'],
+        mode='lines+markers', # Show both lines and individual data points
+        name='Total USDT Value',
+        line=dict(color='skyblue', width=2), # Styling the line
+        marker=dict(size=6, color='lightcoral', line=dict(width=1, color='DarkSlateGrey')) # Styling markers
+    ))
+
+    # Update layout for better readability and mobile responsiveness
+    fig.update_layout(
+        xaxis_title="Time (UTC)", # Explicitly label X-axis as UTC
+        yaxis_title="Total USDT Value",
+        hovermode="x unified", # Improves hover experience, especially on mobile
+        title=dict(
+            text="Historical Binance Account Value",
+            font=dict(size=20),
+            x=0.5 # Center the title
+        ),
+        margin=dict(l=40, r=40, t=60, b=40), # Adjust margins
+        autosize=True, # Allow Plotly to automatically size the chart
+        height=500, # Set a default height, will scale with width due to autosize
+        template="plotly_dark" # Use a dark theme for aesthetics
+    )
+
+    # Display the Plotly chart in Streamlit
+    st.plotly_chart(fig, use_container_width=True, config={'responsive': True, 'displayModeBar': False})
+else:
+    st.info("No balance data available yet. Please ensure the `hourly_balance_collector_utc_ms.py` script is running to populate the database.")
 
 # --- The "Load Data" Button ---
 # Data will only load when this button is clicked
