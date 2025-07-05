@@ -102,7 +102,7 @@ selected_symbol_type = st.selectbox(
 balance_df = load_balance_history()
 
 if not balance_df.empty:
-    st.subheader("Balance History")
+    # st.subheader("Balance History")
 
     # Create the Plotly Line Chart
     fig = go.Figure(data=go.Scatter(
@@ -120,9 +120,9 @@ if not balance_df.empty:
         yaxis_title="Total USDT Value",
         hovermode="x unified", # Improves hover experience, especially on mobile
         title=dict(
-            text="Historical Binance Account Value",
+            text="Account Balance History",
             font=dict(size=20),
-            x=0.5 # Center the title
+            # x=0.5 # Center the title
         ),
         margin=dict(l=40, r=40, t=60, b=40), # Adjust margins
         autosize=True, # Allow Plotly to automatically size the chart
