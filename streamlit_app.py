@@ -73,11 +73,11 @@ def load_balance_history():
 
 # Set the title and favicon that appear in the Browser's tab bar.
 st.set_page_config(
-    page_title='Visiualization of Freedom',
+    page_title='Visualization of Freedom',
     page_icon=':gem:', # This is an emoji shortcode. Could be a URL too.
 )
 
-st.header(f"Visiualization of Freedom")
+st.header(f"Visualization of Freedom")
 
 all_symbols = fetch_symbols()
 
